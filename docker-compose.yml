@@ -24,7 +24,7 @@ services:
     restart: unless-stopped
   esplora:
     profiles: [esplora]
-    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/blockstream/esplora:latest
+    image: blockstream/esplora:latest
     command: /srv/explorer/run.sh bitcoin-regtest explorer
     environment:
       DEBUG: verbose
