@@ -1,22 +1,30 @@
 services:
   bitcoind:
     profiles: [electrum]
-    image: registry.gitlab.com/hashbeam/docker/bitcoind:27.1
+    image: registry.gitlab.com/hashbeam/docker/bitcoind:28.1
     command: "-fallbackfee=0.0002"
     volumes:
       - ./datacore:/srv/app/.bitcoin
+    healthcheck:
+      test: ["CMD-SHELL", "su -c 'bitcoin-cli -regtest getblockchaininfo' blits"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
   electrs:
     profiles: [electrum]
-    image: registry.gitlab.com/hashbeam/docker/electrs:0.10.0
+    image: registry.gitlab.com/hashbeam/docker/electrs:0.10.9
     depends_on:
-      - bitcoind
+      bitcoind:
+        condition: service_healthy
     ports:
       - 50001:50001
     volumes:
       - ./dataelectrs:/srv/app/db
+    restart: unless-stopped
   esplora:
     profiles: [esplora]
-    image: blockstream/esplora:956c74f42eb6ad803d8aedc272ba83d3aa6dcf5c
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/blockstream/esplora:latest
     command: /srv/explorer/run.sh bitcoin-regtest explorer
     environment:
       DEBUG: verbose

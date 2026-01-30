@@ -3,7 +3,7 @@ testnet: true
 issuer:
   codexId: qg8TdlRF-~RGz7bI-pceS960-evWjLKg-NcWTNWy-D9pIYBA
   version: 0
-  api: r~mUOw
+  checksum: r~mUOw
 name: OtherToken
 method: issue
 timestamp: "2024-12-18T10:32:00-02:00"
