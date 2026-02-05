@@ -1,5 +1,18 @@
 #!/usr/bin/env bash
 
+# Check bash version (need 4.0+ for associative arrays)
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    echo "ERROR: This script requires Bash 4.0 or higher (you have ${BASH_VERSION})"
+    echo ""
+    echo "On macOS, install a newer bash with:"
+    echo "  brew install bash"
+    echo ""
+    echo "Then run the script explicitly with the newer bash:"
+    echo "  /opt/homebrew/bin/bash demo.sh    # for Apple Silicon"
+    echo "  /usr/local/bin/bash demo.sh       # for Intel Mac"
+    exit 1
+fi
+
 # variables
 CONTRACT_DIR="contracts"
 DEBUG=0
@@ -19,7 +32,7 @@ export SEED_PASSWORD="seed test password"
 BP_WALLET_FEATURES="--features=cli,hot"
 BP_WALLET_VER="0.12.0-rc.1"
 RGB_WALLET_FEATURES=""
-RGB_WALLET_VER="0.12.0-rc.1.1"
+RGB_WALLET_VER="0.12.0-rc.3"
 
 # RGB wallet types
 WALLET_TYPES=("wpkh" "tapret-key-only")
@@ -117,7 +130,7 @@ _wait_indexers_sync() {
         electrum_json="{\"jsonrpc\": \"2.0\", \"wallet_type\": \"blockchain.block.header\", \"params\": [$block_count], \"id\": 0}"
         while :; do
             electrum_res="$(echo "$electrum_json" \
-                | netcat -w1 localhost $ELECTRUM_PORT \
+                | nc -w1 localhost $ELECTRUM_PORT \
                 | jq '.result')"
             [ -n "$electrum_res" ] && break
             echo -n "."
@@ -198,12 +211,16 @@ _show_state() {
 # helper functions
 check_tools() {
     _subtit "checking required tools"
-    local required_tools="awk base64 cargo cut docker grep head jq netcat sha256sum tr"
+    local required_tools="awk base64 cargo cut docker grep head jq sha256sum tr"
     for tool in $required_tools; do
         if ! which "$tool" >/dev/null; then
-            _die "could not find reruired tool \"$tool\", please install it and try again"
+            _die "could not find required tool \"$tool\", please install it and try again"
         fi
     done
+    # Check for netcat (can be 'nc' or 'netcat' depending on system)
+    if ! which nc >/dev/null && ! which netcat >/dev/null; then
+        _die "could not find required tool \"netcat\" (or \"nc\"), please install it and try again"
+    fi
     if ! docker compose >/dev/null; then
         _die "could not call docker compose (hint: install docker compose plugin)"
     fi
@@ -225,6 +242,16 @@ install_rust_crate() {
     local features opts
     local debug=""
     local force=""
+    
+    # Check if binary already exists and skip if not forcing recompile
+    if [ -d "./$crate/bin" ] && [ $RECOMPILE != 1 ]; then
+        local bin_count=$(ls "./$crate/bin" 2>/dev/null | wc -l)
+        if [ "$bin_count" -gt 0 ]; then
+            _subtit "skipping $crate installation (binary already exists)"
+            return 0
+        fi
+    fi
+    
     if [ -n "$3" ]; then
         read -r -a features <<< "$3"
     fi
@@ -263,9 +290,9 @@ set_aliases() {
 stop_services() {
     _subtit "stopping services"
     # cleanly stop esplora
-    if $COMPOSE ps |grep -q esplora; then
+    if docker compose ps |grep -q esplora; then
         for SRV in socat electrs; do
-            $COMPOSE exec esplora bash -c "sv -w 60 force-stop /etc/service/$SRV"
+            docker compose exec esplora bash -c "sv -w 60 force-stop /etc/service/$SRV"
         done
 
     fi
@@ -277,7 +304,8 @@ start_services() {
     _subtit "checking data directories"
     for data_dir in data0 data1 data2; do
        if [ -d "$data_dir" ]; then
-           if [ "$(stat -c %u $data_dir)" = "0" ]; then
+           # macOS uses 'stat -f %u' instead of 'stat -c %u'
+           if [ "$(stat -f %u $data_dir 2>/dev/null || stat -c %u $data_dir 2>/dev/null)" = "0" ]; then
                echo "existing data directory \"$data_dir\" found, owned by root"
                echo "please remove it and try again (e.g. 'sudo rm -r $data_dir')"
                _die "cannot continue"
@@ -293,7 +321,7 @@ start_services() {
     [ "$PROFILE" = "electrum" ] && EXPOSED_PORTS=(50001)
     [ "$PROFILE" = "esplora" ] && EXPOSED_PORTS=(8094)
     for port in "${EXPOSED_PORTS[@]}"; do
-        if netcat -z localhost "$port"; then
+        if nc -z localhost "$port"; then
             _die "port $port is already bound, services can't be started"
         fi
     done
@@ -421,8 +449,9 @@ issue_contract() {
         -e "s/txid/$TXID_ISSUE/" \
         -e "s/vout/$VOUT_ISSUE/" \
         "$contract_tmpl" > "$contract_yaml"
-    _subtit "issuing"
-    _trace "${RGB[@]}" -d "data${wallet_id}" import issuers/*
+    _subtit "importing issuer files (contract type definitions)"
+    _trace "${RGB[@]}" -d "data${wallet_id}" import issuers/*.issuer
+    _subtit "issuing contract from YAML"
     _trace "${RGB[@]}" -d "data${wallet_id}" issue -w "$wallet" "$contract_yaml" \
         >$TRACE_OUT 2>&1
     issuance="$(cat $TRACE_OUT)"
@@ -459,7 +488,7 @@ prepare_rgb_wallet() {
     _trace "${BPHOT[@]}" seed "$WALLET_PATH/$wallet.seed"
     _trace "${BPHOT[@]}" derive -N -s $der_scheme \
         "$WALLET_PATH/$wallet.seed" "$WALLET_PATH/$wallet.derive" >$TRACE_OUT
-    account="$(cat $TRACE_OUT | awk '/Account/ {print $NF}')"
+    account="$(cat $TRACE_OUT | awk '/Account:/ {print $2}')"
     DESC_MAP[$wallet]="$account/<0;1>/*"
     [ $DEBUG = 1 ] && echo "descriptor: ${DESC_MAP[$wallet]}"
     WALLETS+=("$wallet")
@@ -468,8 +497,13 @@ prepare_rgb_wallet() {
     # RGB setup
     _subtit "creating RGB wallet $wallet"
     wallet_id=${WLT_ID_MAP[$wallet]}
-    _trace "${RGB[@]}" -d "data${wallet_id}" init -q
+    _trace "${RGB[@]}" -d "data${wallet_id}" init
     _trace "${RGB[@]}" -d "data${wallet_id}" create --"$wallet_type" "$wallet" "${DESC_MAP[$wallet]}"
+    # RGB v0.12 stores wallets as NAME.wallet directories, but accepts NAME in commands
+    # Rename the directory if needed for compatibility
+    if [ -d "data${wallet_id}/bitcoin.testnet/$wallet" ] && [ ! -d "data${wallet_id}/bitcoin.testnet/$wallet.wallet" ]; then
+        mv "data${wallet_id}/bitcoin.testnet/$wallet" "data${wallet_id}/bitcoin.testnet/$wallet.wallet"
+    fi
 }
 
 sign_and_broadcast() {
@@ -573,7 +607,7 @@ transfer_create() {
     local fee=()
     [ -n "$SATS" ] && sats=(--sats "$SATS")
     [ -n "$FEE" ] && fee=(--fee "$FEE")
-    _trace "${RGB[@]}" -d "$send_data" pay -w "$SEND_WLT" \
+    _trace "${RGB[@]}" -d "$send_data" pay "$INDEXER_CLI" -w "$SEND_WLT" \
         "${sats[@]}" "${fee[@]}" --force \
         "$INVOICE" "$send_data/$CONSIGNMENT" "$send_data/$PSBT"
     if ! ls "$send_data/$CONSIGNMENT" >/dev/null 2>&1; then
@@ -728,8 +762,8 @@ set_aliases
 trap cleanup EXIT
 
 # install crates
-install_rust_crate "bp-wallet" "$BP_WALLET_VER" "$BP_WALLET_FEATURES" "--git https://github.com/BP-WG/bp-wallet --branch v0.12" # commit 0d439062
-install_rust_crate "rgb-wallet" "$RGB_WALLET_VER" "$RGB_WALLET_FEATURES" "--git https://github.com/RGB-WG/rgb --branch v0.12" # commit 9ffff7fb
+install_rust_crate "bp-wallet" "$BP_WALLET_VER" "$BP_WALLET_FEATURES" "--git https://github.com/BP-WG/bp-wallet --branch v0.12"
+install_rust_crate "rgb-wallet" "$RGB_WALLET_VER" "$RGB_WALLET_FEATURES" "--git https://github.com/RGB-WG/rgb --rev b8c85817c8f1e3336c25dff7e328dff0121722fe"
 
 mkdir "$CONTRACT_DIR"
 
